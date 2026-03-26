@@ -209,11 +209,11 @@ const App = () => {
           
           try {
             // Initiate WebRTC connection
-            await initiateConnection(selectedDevice.id);
+            const initiatedChannel = await initiateConnection(selectedDevice.id);
             console.log('[APP] WebRTC connection initiated, waiting for DataChannel...');
 
             // Wait for the data channel to open using event listener (not polling)
-            const openChannel = await waitForDataChannel(dataChannel);
+            const openChannel = await waitForDataChannel(initiatedChannel);
             console.log('[APP] DataChannel opened! State:', openChannel.readyState);
 
             console.log('[APP] DataChannel ready, sending files');

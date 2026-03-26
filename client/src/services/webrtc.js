@@ -102,6 +102,11 @@ export const setupDataChannelHandlers = (channel, onOpen, onClose, onError) => {
 
 export const waitForDataChannel = (channel) => {
   return new Promise((resolve, reject) => {
+    if (!channel) {
+      reject(new Error('DataChannel is null or undefined'));
+      return;
+    }
+
     console.log('[WEBRTC] Waiting for DataChannel to open (current state:', channel.readyState, ')');
 
     if (channel.readyState === 'open') {

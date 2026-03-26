@@ -110,6 +110,8 @@ export const useWebRTC = () => {
 
       const offer = await createOffer(pc);
       emitOffer(targetId, offer);
+      
+      return channel;
     } catch (error) {
       console.error('[WEBRTC-HOOK] Error initiating connection:', error);
       throw error;
