@@ -33,7 +33,8 @@ export const useWebRTC = () => {
 
           pc.ondatachannel = (event) => {
             console.log('[WEBRTC-HOOK] DataChannel received');
-            setDataChannel(event.channel);
+            const channel = event.channel;
+            setDataChannel(channel);
           };
 
           const answer = await createAnswer(pc, offer);
@@ -41,7 +42,10 @@ export const useWebRTC = () => {
 
           pc.onicecandidate = (event) => {
             if (event.candidate) {
+              console.log('[WEBRTC-HOOK] Sending ICE candidate from answerer:', event.candidate.candidate.substring(0, 40));
               emitIceCandidate(from, event.candidate);
+            } else {
+              console.log('[WEBRTC-HOOK] ICE candidate gathering finished (answerer)');
             }
           };
         }
@@ -54,7 +58,9 @@ export const useWebRTC = () => {
       console.log('[WEBRTC-HOOK] Received answer');
       try {
         if (peerConnection) {
+          console.log('[WEBRTC-HOOK] Setting remote answer, peer connection state:', peerConnection.signalingState);
           await setRemoteAnswer(peerConnection, answer);
+          console.log('[WEBRTC-HOOK] Remote answer set successfully, state:', peerConnection.signalingState);
         }
       } catch (error) {
         console.error('[WEBRTC-HOOK] Error handling answer:', error);
@@ -63,11 +69,13 @@ export const useWebRTC = () => {
 
     socket.on('ice-candidate', async ({ candidate }) => {
       try {
+        console.log('[WEBRTC-HOOK] Received ICE candidate:', candidate.candidate.substring(0, 40));
         if (peerConnection) {
           await addIceCandidate(peerConnection, candidate);
+          console.log('[WEBRTC-HOOK] ICE candidate added successfully');
         }
       } catch (error) {
-        console.error('[WEBRTC-HOOK] Error handling ICE candidate:', error);
+        console.error('[WEBRTC-HOOK] Error handling ICE candidate:', error.message);
       }
     });
 
@@ -91,11 +99,14 @@ export const useWebRTC = () => {
       const channel = createDataChannel(pc);
       setDataChannel(channel);
 
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          emitIceCandidate(targetId, event.candidate);
-        }
-      };
+          pc.onicecandidate = (event) => {
+            if (event.candidate) {
+              console.log('[WEBRTC-HOOK] Sending ICE candidate from initiator:', event.candidate.candidate.substring(0, 40));
+              emitIceCandidate(targetId, event.candidate);
+            } else {
+              console.log('[WEBRTC-HOOK] ICE candidate gathering finished (initiator)');
+            }
+          };
 
       const offer = await createOffer(pc);
       emitOffer(targetId, offer);

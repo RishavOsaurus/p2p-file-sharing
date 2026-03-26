@@ -1,13 +1,62 @@
-const STUN_SERVER = 'stun:stun.l.google.com:19302';
+const STUN_SERVERS = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun1.l.google.com:19302',
+  'stun:stun2.l.google.com:19302',
+  'stun:stun3.l.google.com:19302',
+];
+
+// Free public TURN servers
+const TURN_SERVERS = [
+  {
+    urls: ['turn:openrelay.metered.ca:80'],
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: ['turn:openrelay.metered.ca:443'],
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+];
+
 const CHUNK_SIZE = 64 * 1024; // 64KB
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
 export const createPeerConnection = () => {
   try {
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: [STUN_SERVER] }],
-    });
-    console.log('[WEBRTC] Peer connection created');
+    const config = {
+      iceServers: [
+        { urls: STUN_SERVERS },
+        ...TURN_SERVERS,
+      ],
+      iceCandidatePoolSize: 10,
+    };
+
+    const pc = new RTCPeerConnection(config);
+    
+    console.log('[WEBRTC] Peer connection created with config:', config);
+
+    // Monitor connection state changes
+    pc.onconnectionstatechange = () => {
+      console.log('[WEBRTC] Connection state:', pc.connectionState);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log('[WEBRTC] ICE connection state:', pc.iceConnectionState);
+    };
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        console.log('[WEBRTC] ICE candidate generated:', e.candidate.candidate.substring(0, 50));
+      } else {
+        console.log('[WEBRTC] ICE candidate gathering completed');
+      }
+    };
+
+    pc.onsignalingstatechange = () => {
+      console.log('[WEBRTC] Signaling state:', pc.signalingState);
+    };
+
     return pc;
   } catch (error) {
     console.error('[WEBRTC] Failed to create peer connection:', error);
@@ -27,6 +76,59 @@ export const createDataChannel = (pc, label = 'file-transfer') => {
     console.error('[WEBRTC] Failed to create DataChannel:', error);
     throw error;
   }
+};
+
+export const setupDataChannelHandlers = (channel, onOpen, onClose, onError) => {
+  try {
+    channel.onopen = () => {
+      console.log('[WEBRTC] DataChannel opened');
+      onOpen?.();
+    };
+
+    channel.onclose = () => {
+      console.log('[WEBRTC] DataChannel closed');
+      onClose?.();
+    };
+
+    channel.onerror = (error) => {
+      console.error('[WEBRTC] DataChannel error:', error);
+      onError?.(error);
+    };
+  } catch (error) {
+    console.error('[WEBRTC] Failed to setup DataChannel handlers:', error);
+    throw error;
+  }
+};
+
+export const waitForDataChannel = (channel) => {
+  return new Promise((resolve, reject) => {
+    console.log('[WEBRTC] Waiting for DataChannel to open (current state:', channel.readyState, ')');
+
+    if (channel.readyState === 'open') {
+      console.log('[WEBRTC] DataChannel already open');
+      resolve(channel);
+      return;
+    }
+
+    if (channel.readyState === 'closed') {
+      reject(new Error('DataChannel is closed'));
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      channel.removeEventListener('open', onOpen);
+      reject(new Error('DataChannel open timeout (30 seconds)'));
+    }, 30000);
+
+    const onOpen = () => {
+      clearTimeout(timeout);
+      channel.removeEventListener('open', onOpen);
+      console.log('[WEBRTC] DataChannel opened via event listener');
+      resolve(channel);
+    };
+
+    channel.addEventListener('open', onOpen);
+  });
 };
 
 export const createOffer = async (pc) => {

@@ -16,6 +16,7 @@ import {
   sendFileChunks, 
   receiveFileChunks,
   validateFiles,
+  waitForDataChannel,
 } from './services/webrtc';
 import FileInput from './components/FileInput';
 import DeviceList from './components/DeviceList';
@@ -209,19 +210,14 @@ const App = () => {
           try {
             // Initiate WebRTC connection
             await initiateConnection(selectedDevice.id);
+            console.log('[APP] WebRTC connection initiated, waiting for DataChannel...');
 
-            // Wait for data channel to be ready
-            let attempts = 0;
-            while (!dataChannel || dataChannel.readyState !== 'open') {
-              if (attempts > 50) {
-                throw new Error('DataChannel did not open');
-              }
-              await new Promise(res => setTimeout(res, 100));
-              attempts++;
-            }
+            // Wait for the data channel to open using event listener (not polling)
+            const openChannel = await waitForDataChannel(dataChannel);
+            console.log('[APP] DataChannel opened! State:', openChannel.readyState);
 
             console.log('[APP] DataChannel ready, sending files');
-            sendFileMetadata(dataChannel, selectedFiles);
+            sendFileMetadata(openChannel, selectedFiles);
             
             for (const file of selectedFiles) {
               console.log('[APP] Sending file:', file.name);
@@ -231,7 +227,7 @@ const App = () => {
                 total: file.size,
               });
               
-              await sendFileChunks(dataChannel, file, (progress, total) => {
+              await sendFileChunks(openChannel, file, (progress, total) => {
                 updateTransfer(`send-${file.name}`, { progress });
               });
             }
