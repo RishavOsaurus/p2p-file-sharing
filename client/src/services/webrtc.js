@@ -1,81 +1,148 @@
 const STUN_SERVER = 'stun:stun.l.google.com:19302';
 const CHUNK_SIZE = 64 * 1024; // 64KB
+const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
 export const createPeerConnection = () => {
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: [STUN_SERVER] }],
-  });
-  return pc;
+  try {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: [STUN_SERVER] }],
+    });
+    console.log('[WEBRTC] Peer connection created');
+    return pc;
+  } catch (error) {
+    console.error('[WEBRTC] Failed to create peer connection:', error);
+    throw error;
+  }
 };
 
-export const createDataChannel = (pc, label) => {
-  const channel = pc.createDataChannel(label, {
-    bufferedAmountLowThreshold: 65536,
-  });
-  return channel;
+export const createDataChannel = (pc, label = 'file-transfer') => {
+  try {
+    const channel = pc.createDataChannel(label, {
+      ordered: true,
+    });
+    channel.bufferedAmountLowThreshold = 65536;
+    console.log('[WEBRTC] DataChannel created:', label);
+    return channel;
+  } catch (error) {
+    console.error('[WEBRTC] Failed to create DataChannel:', error);
+    throw error;
+  }
 };
 
 export const createOffer = async (pc) => {
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  return offer;
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    console.log('[WEBRTC] Offer created and set as local description');
+    return offer;
+  } catch (error) {
+    console.error('[WEBRTC] Failed to create offer:', error);
+    throw error;
+  }
 };
 
 export const createAnswer = async (pc, offer) => {
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  return answer;
+  try {
+    const rtcOffer = new RTCSessionDescription(offer);
+    await pc.setRemoteDescription(rtcOffer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    console.log('[WEBRTC] Answer created and set as local description');
+    return answer;
+  } catch (error) {
+    console.error('[WEBRTC] Failed to create answer:', error);
+    throw error;
+  }
 };
 
 export const setRemoteAnswer = async (pc, answer) => {
-  await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  try {
+    const rtcAnswer = new RTCSessionDescription(answer);
+    await pc.setRemoteDescription(rtcAnswer);
+    console.log('[WEBRTC] Remote answer set');
+  } catch (error) {
+    console.error('[WEBRTC] Failed to set remote answer:', error);
+    throw error;
+  }
 };
 
 export const addIceCandidate = async (pc, candidate) => {
-  if (candidate) {
-    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+  try {
+    if (candidate) {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      console.log('[WEBRTC] ICE candidate added');
+    }
+  } catch (error) {
+    console.error('[WEBRTC] Failed to add ICE candidate:', error);
+    // Don't throw - ICE candidates can fail
   }
 };
 
 export const sendFileMetadata = (channel, files) => {
-  const metadata = {
-    type: 'file-meta',
-    files: files.map((f) => ({
-      name: f.name,
-      size: f.size,
-      type: f.type,
-    })),
-  };
-  channel.send(JSON.stringify(metadata));
+  try {
+    if (channel.readyState !== 'open') {
+      throw new Error('DataChannel not open');
+    }
+    const metadata = {
+      type: 'file-meta',
+      files: files.map((f) => ({
+        name: f.name,
+        size: f.size,
+        type: f.type,
+      })),
+    };
+    channel.send(JSON.stringify(metadata));
+    console.log('[FILE-TRANSFER] Metadata sent for', files.length, 'files');
+  } catch (error) {
+    console.error('[FILE-TRANSFER] Failed to send metadata:', error);
+    throw error;
+  }
 };
 
 export const sendFileChunks = async (channel, file, onProgress) => {
-  const reader = new FileReader();
-  let offset = 0;
-
   return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    let offset = 0;
+
     const readNextChunk = () => {
       if (offset >= file.size) {
-        channel.send(JSON.stringify({ type: 'file-end', name: file.name }));
+        try {
+          channel.send(JSON.stringify({ type: 'file-end', name: file.name }));
+          console.log('[FILE-TRANSFER] File complete:', file.name);
+        } catch (error) {
+          console.error('[FILE-TRANSFER] Failed to send file-end:', error);
+        }
         resolve();
         return;
       }
 
       const chunk = file.slice(offset, offset + CHUNK_SIZE);
       reader.onload = (e) => {
-        channel.send(e.target.result);
-        offset += CHUNK_SIZE;
-        onProgress?.(offset, file.size);
-
-        // Wait for bufferedAmount to decrease
-        if (channel.bufferedAmount > 1024 * 1024) {
-          channel.onbufferedamountlow = () => {
-            channel.onbufferedamountlow = null;
+        try {
+          const data = e.target.result;
+          
+          // Check if buffer is too full
+          if (channel.bufferedAmount > MAX_BUFFER_SIZE) {
+            console.log('[FILE-TRANSFER] Buffer full, waiting...');
+            channel.onbufferedamountlow = () => {
+              channel.onbufferedamountlow = null;
+              try {
+                channel.send(data);
+                offset += CHUNK_SIZE;
+                onProgress?.(offset, file.size);
+                readNextChunk();
+              } catch (error) {
+                reject(error);
+              }
+            };
+          } else {
+            channel.send(data);
+            offset += CHUNK_SIZE;
+            onProgress?.(offset, file.size);
             readNextChunk();
-          };
-        } else {
-          readNextChunk();
+          }
+        } catch (error) {
+          reject(error);
         }
       };
       reader.onerror = reject;
@@ -91,8 +158,15 @@ export const receiveFileChunks = (channel, onChunk, onComplete) => {
 
   channel.onmessage = (event) => {
     try {
-      const message = JSON.parse(event.data.toString());
+      // Try to parse as JSON (control messages)
+      const message = JSON.parse(
+        event.data instanceof ArrayBuffer
+          ? new TextDecoder().decode(event.data)
+          : event.data
+      );
+
       if (message.type === 'file-meta') {
+        console.log('[FILE-TRANSFER] Received metadata for', message.files.length, 'files');
         message.files.forEach((file) => {
           receivedFiles[file.name] = {
             name: file.name,
@@ -112,6 +186,7 @@ export const receiveFileChunks = (channel, onChunk, onComplete) => {
           a.download = file.name;
           a.click();
           URL.revokeObjectURL(url);
+          console.log('[FILE-TRANSFER] File downloaded:', file.name);
           delete receivedFiles[message.name];
           onComplete?.();
         }
@@ -119,8 +194,6 @@ export const receiveFileChunks = (channel, onChunk, onComplete) => {
     } catch (e) {
       // Binary data (file chunks)
       if (event.data instanceof ArrayBuffer) {
-        // Find which file this chunk belongs to
-        // For now, assume first file in progress
         const fileNames = Object.keys(receivedFiles).filter(
           (name) =>
             receivedFiles[name].receivedSize < receivedFiles[name].size
@@ -134,4 +207,27 @@ export const receiveFileChunks = (channel, onChunk, onComplete) => {
       }
     }
   };
+};
+
+export const validateFiles = (files) => {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error('No files selected');
+  }
+  
+  const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB per file
+  const MAX_TOTAL_SIZE = 500 * 1024 * 1024; // 500MB total
+  
+  let totalSize = 0;
+  for (const file of files) {
+    if (file.size > MAX_FILE_SIZE) {
+      throw new Error(`File too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+    }
+    totalSize += file.size;
+  }
+  
+  if (totalSize > MAX_TOTAL_SIZE) {
+    throw new Error(`Total size too large: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
+  }
+  
+  return true;
 };
