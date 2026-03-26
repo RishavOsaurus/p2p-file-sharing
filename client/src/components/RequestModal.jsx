@@ -26,7 +26,7 @@ const RequestModal = () => {
         </h2>
         <div className="mb-6">
           <h3 className="font-semibold mb-2">Files:</h3>
-          <ul className="list-disc list-inside">
+          <ul className="list-disc list-inside space-y-1 mb-4">
             {incomingRequest.files.map((file, idx) => (
               <li key={idx} className="text-sm text-gray-700">
                 {file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)
