@@ -9,9 +9,14 @@ export const useDevices = () => {
     const socket = getSocket();
     if (!socket) return;
 
-    socket.on('devices', (deviceList) => {
-      setDevices(deviceList.filter((d) => d.id !== socket.id));
-    });
+    const handleDevices = (deviceList) => {
+      console.log('[HOOK] Devices updated:', deviceList.length);
+      // Filter out self
+      const otherDevices = deviceList.filter(d => d.id !== socket.id);
+      setDevices(otherDevices);
+    };
+
+    socket.on('devices', handleDevices);
 
     return () => {
       socket.off('devices');

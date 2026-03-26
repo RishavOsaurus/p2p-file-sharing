@@ -1,9 +1,22 @@
 import { useEffect, useState } from 'react';
 import useAppStore from './store/appStore';
-import { initSocket, getSocket, emitJoin, emitSendRequest } from './services/socket';
+import { 
+  initSocket, 
+  getSocket, 
+  emitJoin, 
+  emitSendRequest,
+  isSocketConnected,
+  emitAcceptRequest,
+  emitRejectRequest,
+} from './services/socket';
 import { useDevices } from './hooks/useDevices';
 import { useWebRTC } from './hooks/useWebRTC';
-import { sendFileMetadata, sendFileChunks, receiveFileChunks } from './services/webrtc';
+import { 
+  sendFileMetadata, 
+  sendFileChunks, 
+  receiveFileChunks,
+  validateFiles,
+} from './services/webrtc';
 import FileInput from './components/FileInput';
 import DeviceList from './components/DeviceList';
 import RequestModal from './components/RequestModal';
@@ -15,6 +28,8 @@ const App = () => {
   const [joined, setJoined] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [selectedDevice, setSelectedDevice] = useState(null);
+  const [error, setError] = useState('');
+  const [isTransfering, setIsTransfering] = useState(false);
   
   const devices = useDevices();
   const { initiateConnection } = useWebRTC();
@@ -25,11 +40,18 @@ const App = () => {
     addTransfer,
     removeTransfer,
     updateTransfer,
+    setIsConnected,
   } = useAppStore();
 
   // Initialize socket connection
   useEffect(() => {
-    initSocket();
+    try {
+      initSocket();
+      console.log('[APP] Socket initialized');
+    } catch (err) {
+      setError('Failed to initialize WebSocket connection');
+      console.error('[APP] Socket initialization error:', err);
+    }
   }, []);
 
   // Handle incoming requests
@@ -38,21 +60,30 @@ const App = () => {
     if (!socket) return;
 
     socket.on('send-request', ({ from, fromName, files }) => {
+      console.log('[APP] Received transfer request from', fromName);
       setIncomingRequest({ from, fromName, files });
     });
 
     socket.on('accept-request', ({ from }) => {
-      console.log('Request accepted by', from);
+      console.log('[APP] Request accepted by', from);
+      setError('');
     });
 
     socket.on('reject-request', ({ from }) => {
-      console.log('Request rejected by', from);
+      console.log('[APP] Request rejected by', from);
+      setError('Transfer request was rejected');
+    });
+
+    socket.on('error', (error) => {
+      console.error('[APP] Socket error:', error);
+      setError(error.message || 'Connection error');
     });
 
     return () => {
       socket.off('send-request');
       socket.off('accept-request');
       socket.off('reject-request');
+      socket.off('error');
     };
   }, [setIncomingRequest]);
 
@@ -60,16 +91,23 @@ const App = () => {
   useEffect(() => {
     if (!dataChannel) return;
 
+    console.log('[APP] Setting up DataChannel listeners');
+
     dataChannel.onopen = () => {
-      console.log('DataChannel opened');
+      console.log('[APP] DataChannel opened');
+      setIsConnected(true);
+      setError('');
     };
 
     dataChannel.onclose = () => {
-      console.log('DataChannel closed');
+      console.log('[APP] DataChannel closed');
+      setIsConnected(false);
     };
 
     dataChannel.onerror = (error) => {
-      console.error('DataChannel error:', error);
+      console.error('[APP] DataChannel error:', error);
+      setError('Data transfer error: ' + error.message);
+      setIsConnected(false);
     };
 
     receiveFileChunks(
@@ -82,65 +120,154 @@ const App = () => {
       },
       () => {
         removeTransfer(`recv-${selectedDevice?.name}`);
+        setError('');
       }
     );
-  }, [dataChannel, selectedDevice, removeTransfer, updateTransfer]);
+  }, [dataChannel, selectedDevice, removeTransfer, updateTransfer, setIsConnected]);
 
   const handleJoin = () => {
     if (!deviceName.trim()) {
-      alert('Please enter a device name');
+      setError('Please enter a device name');
       return;
     }
-    emitJoin(deviceName, room);
-    setJoined(true);
+    if (!room.trim()) {
+      setError('Please enter a room ID');
+      return;
+    }
+    
+    try {
+      const success = emitJoin(deviceName, room);
+      if (!success) {
+        setError('Not connected to server. Please check your connection.');
+        return;
+      }
+      setJoined(true);
+      setError('');
+      console.log('[APP] Joined room:', room);
+    } catch (err) {
+      setError('Failed to join room: ' + err.message);
+      console.error('[APP] Join error:', err);
+    }
   };
 
   const handleSelectDevice = (device) => {
     setSelectedDevice(device);
+    setError('');
+    console.log('[APP] Selected device:', device.name);
   };
 
   const handleFilesSelected = (files) => {
-    setSelectedFiles(files);
+    try {
+      validateFiles(files);
+      setSelectedFiles(files);
+      setError('');
+      console.log('[APP] Files selected:', files.length);
+    } catch (err) {
+      setError(err.message);
+    }
   };
 
   const handleSendFiles = async () => {
-    if (!selectedDevice || selectedFiles.length === 0) {
-      alert('Select a device and files');
+    if (!selectedDevice) {
+      setError('Select a device first');
+      return;
+    }
+    if (selectedFiles.length === 0) {
+      setError('Select files to send');
       return;
     }
 
-    const socket = getSocket();
-    emitSendRequest(selectedDevice.id, 
-      selectedFiles.map(f => ({ name: f.name, size: f.size }))
-    );
+    if (isTransfering) {
+      setError('Transfer already in progress');
+      return;
+    }
 
-    // Wait for acceptance
-    await new Promise(resolve => {
-      socket.once('accept-request', async () => {
-        // Initiate WebRTC connection
-        await initiateConnection(selectedDevice.id);
+    try {
+      setIsTransfering(true);
+      setError('');
 
-        // Wait for data channel to be ready
-        setTimeout(async () => {
-          if (dataChannel?.readyState === 'open') {
+      const socket = getSocket();
+      console.log('[APP] Sending transfer request to', selectedDevice.name);
+      
+      emitSendRequest(selectedDevice.id, 
+        selectedFiles.map(f => ({ name: f.name, size: f.size }))
+      );
+
+      // Wait for acceptance
+      let accepted = false;
+      const acceptPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          setError('Transfer request timeout - no response from receiver');
+          resolve();
+        }, 30000); // 30 second timeout
+
+        socket.once('accept-request', async () => {
+          clearTimeout(timer);
+          accepted = true;
+          console.log('[APP] Transfer accepted, initiating WebRTC connection');
+          
+          try {
+            // Initiate WebRTC connection
+            await initiateConnection(selectedDevice.id);
+
+            // Wait for data channel to be ready
+            let attempts = 0;
+            while (!dataChannel || dataChannel.readyState !== 'open') {
+              if (attempts > 50) {
+                throw new Error('DataChannel did not open');
+              }
+              await new Promise(res => setTimeout(res, 100));
+              attempts++;
+            }
+
+            console.log('[APP] DataChannel ready, sending files');
             sendFileMetadata(dataChannel, selectedFiles);
+            
             for (const file of selectedFiles) {
+              console.log('[APP] Sending file:', file.name);
               addTransfer(`send-${file.name}`, {
                 fileName: file.name,
                 progress: 0,
                 total: file.size,
               });
+              
               await sendFileChunks(dataChannel, file, (progress, total) => {
                 updateTransfer(`send-${file.name}`, { progress });
               });
             }
+            
+            console.log('[APP] All files sent');
             removeTransfer(`send-${selectedFiles[0]?.name}`);
             setSelectedFiles([]);
+            setSelectedDevice(null);
+            setError('');
+          } catch (err) {
+            console.error('[APP] Send error:', err);
+            setError('Transfer failed: ' + err.message);
+          } finally {
+            setIsTransfering(false);
           }
           resolve();
-        }, 1000);
+        });
+
+        socket.once('reject-request', () => {
+          clearTimeout(timer);
+          setError('Transfer request was rejected');
+          setIsTransfering(false);
+          resolve();
+        });
       });
-    });
+
+      await acceptPromise;
+      
+      if (!accepted) {
+        setIsTransfering(false);
+      }
+    } catch (err) {
+      console.error('[APP] Send files error:', err);
+      setError('Failed to send files: ' + err.message);
+      setIsTransfering(false);
+    }
   };
 
   if (!joined) {
@@ -148,6 +275,13 @@ const App = () => {
       <div className="min-h-screen bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center p-4">
         <div className="bg-white rounded-lg shadow-xl p-8 max-w-md w-full">
           <h1 className="text-3xl font-bold text-gray-900 mb-6">P2P File Sharing</h1>
+          
+          {error && (
+            <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+              {error}
+            </div>
+          )}
+          
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -157,7 +291,7 @@ const App = () => {
                 type="text"
                 value={deviceName}
                 onChange={(e) => setDeviceName(e.target.value)}
-                placeholder="My Phone"
+                placeholder="My Laptop"
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
@@ -189,8 +323,17 @@ const App = () => {
       <div className="max-w-4xl mx-auto">
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">P2P File Sharing</h1>
-          <p className="text-gray-600">Connected as: <span className="font-medium">{deviceName}</span></p>
+          <p className="text-gray-600">
+            Connected as: <span className="font-medium">{deviceName}</span> 
+            {' '}in room: <span className="font-medium">{room}</span>
+          </p>
         </div>
+
+        {error && (
+          <div className="mb-4 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">
+            {error}
+          </div>
+        )}
 
         <div className="grid md:grid-cols-2 gap-6">
           <div className="bg-white rounded-lg shadow p-6">
@@ -209,7 +352,7 @@ const App = () => {
                 {selectedFiles.length > 0 && (
                   <div className="mt-4">
                     <h3 className="font-medium text-gray-900 mb-2">Selected Files:</h3>
-                    <ul className="list-disc list-inside space-y-1">
+                    <ul className="list-disc list-inside space-y-1 mb-4">
                       {selectedFiles.map((file) => (
                         <li key={file.name} className="text-sm text-gray-700">
                           {file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)
@@ -218,9 +361,10 @@ const App = () => {
                     </ul>
                     <button
                       onClick={handleSendFiles}
-                      className="w-full mt-4 bg-green-500 text-white py-2 rounded-lg hover:bg-green-600 transition font-medium"
+                      disabled={isTransfering}
+                      className="w-full bg-green-500 text-white py-2 rounded-lg hover:bg-green-600 transition font-medium disabled:bg-gray-400"
                     >
-                      Send Files
+                      {isTransfering ? 'Transferring...' : 'Send Files'}
                     </button>
                   </div>
                 )}
